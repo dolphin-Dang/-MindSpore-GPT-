@@ -34,7 +34,7 @@ class Tokenizer:
         else:
             self.stoi = {ch: i for i, ch in enumerate(chars)}
             self.itos = {i: ch for i, ch in enumerate(chars)}
-            print(f"Create a new tokenizer.")
+            print(f"Creating a new tokenizer.")
         self.block_sizes = block_size
         self.data = data
 
