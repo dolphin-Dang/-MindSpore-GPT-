@@ -14,93 +14,36 @@ from mindspore.train.callback import (
     TimeMonitor,
 )
 from mindspore.train.model import Model
+from mindspore import load_checkpoint, load_param_into_net
 
 from src.dataset import create_dataset
 from src.gpt import GPT, GPTWithLoss
 from src.utils import GPTConfig, LearningRate
 
 SEQ_LEN = 128
-VOCAB_SIZE = 1928  # 序列长度和词表大小根据选择的小说和预处理的结果调整
-
+VOCAB_SIZE = 1928
 
 def run_train():
     """train function"""
-    parser = argparse.ArgumentParser(description="GPT training")
-    parser.add_argument(
-        "--device_id", type=int, default=0, help="Device id, default is 0."
-    )
-    parser.add_argument(
-        "--device_num", type=int, default=1, help="Use device nums, default is 1."
-    )
-    parser.add_argument(
-        "--distribute",
-        type=str,
-        default="false",
-        choices=["true", "false"],
-        help="Run distribute, default is false.",
-    )
-    parser.add_argument(
-        "--optimizer",
-        type=str,
-        default="adam",
-        choices=["adam", "lamb"],
-        help="select which optimizer to be used, default adam",
-    )
-    parser.add_argument(
-        "--epoch_size", type=int, default=1, help="Epoch size, default is 2."
-    )
-    parser.add_argument(
-        "--data_path",
-        type=str,
-        default="./dataset",
-        help="Data path of your MindRecord files.",
-    )
-    parser.add_argument(
-        "--start_lr",
-        type=float,
-        default="5e-4",
-        help="Start learning rate, default is 5e-4.",
-    )
-    parser.add_argument(
-        "--end_lr",
-        type=float,
-        default="1e-6",
-        help="End learning rate, default is 1e-6.",
-    )
-    parser.add_argument(
-        "--sink_size",
-        type=int,
-        default=10,
-        help="Sink size for every iteration, default is 100",
-    )
-
-    args_opt = parser.parse_args()
-
-    context.set_context(
-        mode=context.PYNATIVE_MODE, device_target="Ascend", device_id=args_opt.device_id
-    )
-    if args_opt.distribute == "true":
-        D.init()
-        device_num = args_opt.device_num
-        rank = device_id % device_num
-        print("device_id is {}, rank_id is {}".format(device_id, rank))
-
-        context.reset_auto_parallel_context()
-        context.set_auto_parallel_context(
-            parallel_mode=ParallelMode.DATA_PARALLEL,
-            gradients_mean=True,
-            device_num=device_num,
-        )
-    else:
-        rank = 0
-        device_num = 1
+    # local config
+    local_config = {
+        "optimizer": "adam", # adam, lamb
+        "epoch_size": 2,
+        "data_path": "./dataset",
+        "ckpt_path": "GPT_baseline.ckpt",
+        "start_lr": 5e-4,
+        "end_lr": 1e-6,
+        "sink_size": 10
+    }
+    
+    context.set_context(mode=context.PYNATIVE_MODE, device_target="Ascend", device_id=0)
 
     config = GPTConfig(
-        batch_size=128,
+        batch_size=64,
         seq_length=SEQ_LEN,
         vocab_size=VOCAB_SIZE,
-        embedding_size=256,
-        num_layers=8,
+        embedding_size=128,
+        num_layers=4,
         num_heads=8,
         expand_ratio=4,
         post_layernorm_residual=False,
@@ -110,19 +53,15 @@ def run_train():
     gpt = GPT(config)
     gpt_with_loss = GPTWithLoss(gpt)
 
-    ds = create_dataset(
-        config.batch_size,
-        data_path=args_opt.data_path,
-        device_num=device_num,
-        rank=rank,
-    )
-
-    epoch_num = args_opt.epoch_size
+    ds = create_dataset(config.batch_size, data_path=local_config["data_path"])
+    print("Dataset created.")
+    
+    epoch_num = local_config["epoch_size"]
     step_per_epoch = ds.get_dataset_size()
 
     lr = LearningRate(
-        learning_rate=args_opt.start_lr,
-        end_learning_rate=args_opt.end_lr,
+        learning_rate=local_config["start_lr"],
+        end_learning_rate=local_config["end_lr"],
         warmup_steps=int(step_per_epoch * epoch_num * 0.1),
         decay_steps=epoch_num * step_per_epoch,
     )
@@ -139,18 +78,18 @@ def run_train():
         {"order_params": params},
     ]
 
-    if args_opt.optimizer == "lamb":
+    if local_config["optimizer"] == "lamb":
         optimizer = nn.Lamb(group_params, learning_rate=lr)
-    else:
+    elif local_config["optimizer"] == "adam":
         optimizer = nn.AdamWeightDecay(group_params, learning_rate=lr)
+    else:
+        raise AsserError(f'No such optimizer {local_config["optimizer"]}!')
 
-    callback_size = args_opt.sink_size
+    callback_size = local_config["sink_size"]
     actual_epoch_num = int(epoch_num * step_per_epoch / callback_size)
     callback = [TimeMonitor(callback_size), LossMonitor(callback_size)]
 
-    config_ck = CheckpointConfig(
-        save_checkpoint_steps=step_per_epoch, keep_checkpoint_max=1
-    )
+    config_ck = CheckpointConfig(save_checkpoint_steps=step_per_epoch, keep_checkpoint_max=1)
     ckpoint_cb = ModelCheckpoint(prefix="GPT", config=config_ck)
     callback.append(ckpoint_cb)
 
@@ -159,6 +98,13 @@ def run_train():
     print(f"actual epoch num = {actual_epoch_num}")
     print(f"step per epoch = {step_per_epoch}")
     gpt_with_loss.set_train(True)
+
+    # load pre-trained params
+    if local_config["ckpt_path"] != None:
+        param_dict = load_checkpoint(local_config["ckpt_path"])
+        load_param_into_net(gpt_with_loss, param_dict)
+        print(f'Pre-trained ckpt loaded : {local_config["ckpt_path"]}')
+    
     model = Model(gpt_with_loss, optimizer=optimizer)
     model.train(
         actual_epoch_num,
