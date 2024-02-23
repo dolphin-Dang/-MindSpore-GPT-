@@ -26,7 +26,8 @@
     + 成功使其输出正常的一句话，但是每句话之间关联还是比较少。
 + 在MindSpore2.0.0下推理速度非常慢，但是在MindSpore2.2下推理比较快。
   + 是MindSpore版本问题，代码中可优化空间小。
-+ 输出达到限制之后就停止，无论一句话是否结束。
++ 输出达到限制之后就停止，无论一句话是否结束。（模型没有学习到结束符）
 
 发现：
 + 在src/gpt.py的CausalSelfAttention类中，调用MindSpore官方API`att = F.masked_fill(att, mask, -1e9)`效率并不如直接进行mask计算来的快。
++ Dropout模块影响了模型训练时的收敛与否，但经过一段时间之后不可复现该问题。
